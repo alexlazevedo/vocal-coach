@@ -29,10 +29,10 @@ export const GUIDE = [
     cause: 'A nota não está "pensada" antes de sair; a voz procura o alvo depois de começar.',
     actions: [
       'Antes de cantar, ouça a nota por dentro (audição interna) por um segundo.',
-      'Faça staccato: "ha-ha-ha" curto em cada nota da escala, acertando de primeira.',
+      'Faça o exercício Staccato do app: "ha" curto em cada nota, acertando de primeira. O relatório mostra quantas notas ainda deslizaram.',
       'Comece a nota um pouco mais leve; volume alto no ataque favorece a rampa.'
     ],
-    detect: 'Mais de 35% das notas começam 60 cents ou mais abaixo.'
+    detect: 'Mais de 35% das notas começam 50 cents ou mais abaixo e levam tempo para assentar.'
   },
   {
     id: 'wobble', kind: 'medido', title: 'Nota oscilando',

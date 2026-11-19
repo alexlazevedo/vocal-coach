@@ -304,3 +304,4 @@ input[type=range]{width:100%;accent-color:var(--ref)}
 .meter{position:relative;height:14px;border-radius:7px;background:rgba(255,255,255,.05);border:1px solid var(--line);overflow:hidden}
 .meter .fill{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:7px;transition:width .06s linear, background .15s}
 .meter .gate{position:absolute;top:-2px;bottom:-2px;width:2px;margin-left:-1px;background:#fff;box-shadow:0 0 6px #fff}
+.range-ed{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}

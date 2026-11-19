@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Bump VERSION on every release.
-const VERSION = 'canto-v1.1.0';
+const VERSION = 'canto-v1.2.0';
 const FILES = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'js/app.js', 'js/audio.js', 'js/analysis.js', 'js/exercises.js', 'js/guide.js', 'icons/icon-180.png', 'icons/icon-192.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {

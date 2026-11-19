@@ -1,9 +1,9 @@
 import { AudioEngine, midiToHz } from './audio.js';
-import { analyzePhrase, analyzeGlide, stableExtreme, findBreaks, summarizeNotes, rate, median, mean, GOOD, NEAR } from './analysis.js';
+import { analyzePhrase, analyzeGlide, stableExtreme, findBreaks, recurringBreaks, summarizeNotes, rate, median, mean, GOOD, NEAR } from './analysis.js';
 import { EXERCISES, QUICK, exById, buildPlan, estimateMin, noteName, setNotation, intervalName, INTERVALS, DEFAULT_RANGE } from './exercises.js';
 import { GUIDE, guideById, tipsFor } from './guide.js';
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 /* =========================================================
    Storage (this device only)
@@ -181,7 +181,7 @@ function drawBars(ctx, notes, x0, msToX, y, color, alpha, per) {
   let t = x0;
   ctx.fillStyle = rgba(color, alpha); ctx.strokeStyle = rgba(color, Math.min(1, alpha * 2.2));
   for (const n of notes) {
-    const a = msToX(t), b = msToX(t + n.d * 1000 - 40);
+    const a = msToX(t), b = msToX(t + (n.len ? n.len * 1000 : n.d * 1000 - 40));
     const hh = Math.max(6, Math.min(14, per * 0.8));
     ctx.beginPath(); ctx.roundRect(a, y(n.m) - hh / 2, Math.max(4, b - a), hh, 4); ctx.fill(); ctx.stroke();
     t += n.d * 1000;
@@ -437,6 +437,23 @@ function renderProgress() {
   const pr = h(`<div class="panel" style="--c:${COL.you}"></div>`);
   if (r) {
     pr.append(keysStrip(r));
+    const ed = h(`<div class="range-ed">
+      <b class="kind" style="flex-basis:100%">Faixa de trabalho</b>
+      <span class="small muted">De</span>
+      <div class="stepper"><button data-k="lo" data-d="-1" aria-label="Início meio tom abaixo">−</button><span style="min-width:44px;font-family:var(--f-display);font-weight:600">${noteName(r.lo)}</span><button data-k="lo" data-d="1" aria-label="Início meio tom acima">+</button></div>
+      <span class="small muted">até</span>
+      <div class="stepper"><button data-k="hi" data-d="-1" aria-label="Topo meio tom abaixo">−</button><span style="min-width:44px;font-family:var(--f-display);font-weight:600">${noteName(r.hi)}</span><button data-k="hi" data-d="1" aria-label="Topo meio tom acima">+</button></div>
+    </div>`);
+    ed.querySelectorAll('[data-k]').forEach(btn => btn.addEventListener('click', () => {
+      const k = btn.dataset.k, nv = r[k] + (+btn.dataset.d);
+      const floor = (r.low ?? r.lo - 12) - 2, ceil = (r.high ?? r.hi + 12) + 2;
+      if (k === 'lo' && (nv < floor || nv > r.hi - 5)) return toast('O início precisa ficar ao menos 5 semitons abaixo do topo.');
+      if (k === 'hi' && (nv > ceil || nv < r.lo + 5)) return toast(nv > ceil ? 'Acima do seu alcance medido.' : 'O topo precisa ficar ao menos 5 semitons acima do início.');
+      r[k] = nv; saveProfile(); renderRangeChip();
+      const sc = $('v-progress').scrollTop; renderProgress(); $('v-progress').scrollTop = sc;
+    }));
+    pr.append(ed);
+    pr.append(h(`<p class="small muted" style="margin-top:6px">Os exercícios usam essa faixa. Mudanças valem a partir do próximo treino.</p>`));
     const tests = S.rangeTests.slice(-6).reverse();
     if (tests.length) {
       const tb = h(`<table class="tbl" style="margin-top:12px"><thead><tr><th>Teste</th><th>Grave</th><th>Agudo</th><th>Extensão</th></tr></thead><tbody></tbody></table>`);
@@ -730,7 +747,9 @@ function repFeedback(rep, res) {
     else if (n.drift < -30) parts.push('Caiu no fim.');
     if (n.dur < 2500) parts.push('Segure mais.');
   }
-  if (sung.filter(n => n.scoop === 'below').length > sung.length / 2) parts.push('Deslizando até as notas.');
+  const scoops = sung.filter(n => n.scoop === 'below').length;
+  if (rep.staccato) parts.push(scoops ? (scoops === 1 ? 'Deslizou em uma nota.' : `Deslizou em ${scoops} notas.`) : 'Ataques limpos.');
+  else if (scoops > sung.length / 2) parts.push('Deslizando até as notas.');
   let small = `Erro médio ${res.meanAbs}¢ · ${biasWord(res.bias)}`;
   if (oct) small += ' · você cantou uma oitava ' + (oct.octave > 0 ? 'acima' : 'abaixo') + ' em alguma nota (conta como certa)';
   return [parts.join(' '), small];
@@ -832,7 +851,8 @@ function finishSession(partial) {
   const sus = phraseNotes.filter(n => n.ex === 'sustain' && n.err != null);
   const extras = {};
   if (sus.length) { extras.drift = Math.round(median(sus.map(n => n.drift))); const sh = sus.filter(n => n.dur < 2500).length; if (sh >= Math.max(1, sus.length / 2)) extras.shortHolds = sh; }
-  const brk = blocks.flatMap(b => b.entries.filter(e => e.rep.glide && e.res.breaks).flatMap(e => e.res.breaks.map(x => Math.round(x.at))));
+  // a break only counts if it shows up in more than one siren (single ones are usually tracker noise)
+  const brk = recurringBreaks(blocks.flatMap(b => b.entries.filter(e => e.rep.glide && e.res.voiced).map(e => e.res.breaks || [])));
   if (brk.length) extras.breaks = [...new Set(brk)].sort((a, b) => a - b).map(m => noteName(m));
   const range = curRange();
   const third = range.lo + (range.hi - range.lo) * 2 / 3;
@@ -880,7 +900,7 @@ function renderReport(o, s, blocks, tips) {
       if (ex.glide) {
         const gs = b.entries.map(e => e.res).filter(r => r.voiced);
         const lo = gs.length ? Math.min(...gs.map(g => g.low)) : null, hi = gs.length ? Math.max(...gs.map(g => g.high)) : null;
-        const br = [...new Set(gs.flatMap(g => g.breaks.map(x => Math.round(x.at))))];
+        const br = recurringBreaks(gs.map(g => g.breaks));
         cells = `<td colspan="2">${lo == null ? '—' : noteName(lo) + '–' + noteName(hi)}</td><td>${br.length ? 'quebra ' + br.map(m => noteName(m)).join(', ') : 'sem quebras'}</td>`;
       } else {
         const ns = b.entries.flatMap(e => e.res.notes);
@@ -1196,7 +1216,7 @@ function buildSummary() {
     const sm = s.sum || {};
     const parts = (s.blocks || []).map(b => {
       const ex = exById(b.ex);
-      if (ex.glide) { const g = b.reps.filter(x => x.g && x.g.hi != null); return g.length ? `${ex.name}: ${noteName(Math.min(...g.map(x => x.g.lo)))}–${noteName(Math.max(...g.map(x => x.g.hi)))}${g.some(x => x.g.br.length) ? ', quebras ' + [...new Set(g.flatMap(x => x.g.br.map(m => noteName(Math.round(m)))))].join('/') : ''}` : ex.name + ': sem voz'; }
+      if (ex.glide) { const g = b.reps.filter(x => x.g && x.g.hi != null); return g.length ? `${ex.name}: ${noteName(Math.min(...g.map(x => x.g.lo)))}–${noteName(Math.max(...g.map(x => x.g.hi)))}${(() => { const rb = recurringBreaks(g.map(x => x.g.br.map(at => ({ at })))); return rb.length ? ', quebra recorrente ' + rb.map(m => noteName(m)).join('/') : ''; })()}` : ex.name + ': sem voz'; }
       const ns = b.reps.flatMap(x => x.n).map(n => ({ target: n[0], err: n.length > 1 ? n[1] : null, stab: n[2], attackMs: n[3], scoop: n[4] ? 'below' : null, dur: n[6] }));
       const su = summarizeNotes(ns);
       return `${ex.name}: ${su.hitPct}% afinadas, erro ${su.meanAbs ?? '-'}¢, viés ${su.bias ?? '-'}¢${su.stab != null ? ', estab. ' + su.stab + '¢' : ''}${su.scoopPct ? ', ' + su.scoopPct + '% deslizando' : ''}`;

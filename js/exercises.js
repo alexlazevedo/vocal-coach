@@ -60,6 +60,17 @@ export const EXERCISES = [
     }
   },
   {
+    id: 'staccato', name: 'Staccato', color: '#ffe45c',
+    desc: 'Notas curtas e destacadas num "ha" leve: 1-3-5-3-1. Acerte cada nota de primeira, sem deslizar até ela.',
+    measures: ['Ataque', 'Afinação de primeira'], defaultReps: 5,
+    watch: ['scoop', 'hardattack'],
+    gen(range, reps, tempo) {
+      const d = 0.62 * (TEMPO[tempo] || 1), steps = [0, 4, 7, 4, 0];
+      return climb(range.lo, Math.max(range.lo, range.hi - 7), reps)
+        .map(r => ({ notes: steps.map(s => ({ m: r + s, d, len: 0.24 })), label: 'Tônica ' + noteName(r), staccato: true }));
+    }
+  },
+  {
     id: 'intervals', name: 'Intervalos', color: '#ffb340',
     desc: 'O app toca duas notas; você repete as duas. Treina ouvido e precisão nos saltos.',
     measures: ['Afinação nos saltos', 'Por tipo de intervalo'], defaultReps: 8,
@@ -103,7 +114,7 @@ export const EXERCISES = [
 export const exById = id => EXERCISES.find(e => e.id === id);
 
 /* Quick session: a bit of everything, ~7 minutes */
-export const QUICK = [['sustain', 3], ['scale5', 4], ['intervals', 5], ['arpeggio', 3], ['siren', 2]];
+export const QUICK = [['sustain', 3], ['scale5', 4], ['staccato', 3], ['intervals', 5], ['arpeggio', 3], ['siren', 2]];
 
 export function buildPlan(items, range, tempo) {
   return items.map(([id, reps]) => {

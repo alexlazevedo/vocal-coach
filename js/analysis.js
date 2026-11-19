@@ -105,8 +105,8 @@ export function noteMetrics(seg, target) {
   const startErr = mean(errs.slice(0, 2));
   const attackMs = settle >= 0 ? fr[settle].t - fr[0].t : null;
   let scoop = null;
-  if (startErr < -60 && (attackMs == null || attackMs > 60)) scoop = 'below';
-  else if (startErr > 60 && (attackMs == null || attackMs > 60)) scoop = 'above';
+  if (startErr < -50 && (attackMs == null || attackMs >= 45)) scoop = 'below';
+  else if (startErr > 50 && (attackMs == null || attackMs >= 45)) scoop = 'above';
   // steady part: after settling (or 25%) up to 90%
   const a = settle >= 0 ? settle : Math.floor(errs.length * 0.25);
   const b = Math.max(a + 1, Math.ceil(errs.length * 0.9));
@@ -150,18 +150,26 @@ export function analyzePhrase(targets, frames) {
 /* ---------- glides (siren) and range runs ---------- */
 export function findBreaks(frames) {
   const v = frames.filter(f => f.midi != null);
+  if (v.length < 10) return [];
+  const floor = pct(v.map(f => f.midi), 0.05);
+  const steady = a => a.length >= 3 && Math.max(...a) - Math.min(...a) < 1.2;
   const breaks = [];
-  for (let k = 1; k < v.length; k++) {
-    const dt = v[k].t - v[k - 1].t, dm = v[k].midi - v[k - 1].midi;
-    if (dt <= 70 && Math.abs(dm) >= 1.8) {
-      // must persist: the next frames stay near the new pitch
-      const nxt = v.slice(k, k + 3).map(f => f.midi);
-      if (nxt.length >= 3 && Math.max(...nxt) - Math.min(...nxt) < 1.2) breaks.push({ at: Math.min(v[k].midi, v[k - 1].midi), kind: 'salto', dir: Math.sign(dm) });
-    } else if (dt > 90 && dt < 450 && Math.abs(dm) < 3 && frames.some(f => f.t > v[k - 1].t && f.t < v[k].t && f.level > 0)) {
-      breaks.push({ at: (v[k].midi + v[k - 1].midi) / 2, kind: 'falha', dir: 0 });
+  for (let k = 3; k + 3 <= v.length; k++) {
+    const dt = v[k].t - v[k - 1].t, dm = v[k].midi - v[k - 1].midi, adm = Math.abs(dm);
+    const before = v.slice(k - 3, k).map(f => f.midi), after = v.slice(k, k + 3).map(f => f.midi);
+    if (!steady(before) || !steady(after)) continue;
+    // the bottom of a glide is weak and breathy: tracker errors, not register breaks
+    if (Math.min(v[k].midi, v[k - 1].midi) < floor + 4) continue;
+    // jumps of about an octave are almost always the pitch tracker locking onto a harmonic
+    if (Math.abs(adm - 12) < 1.5 || Math.abs(adm - 24) < 1.5) continue;
+    if (dt <= 70 && adm >= 1.8 && adm <= 9) {
+      breaks.push({ at: Math.min(v[k].midi, v[k - 1].midi), kind: 'salto', dir: Math.sign(dm) });
+    } else if (dt > 120 && dt < 450 && adm < 2.5) {
+      // sound kept going but the pitch was lost: a crack, not a breath
+      const gap = frames.filter(f => f.t > v[k - 1].t && f.t < v[k].t);
+      if (gap.length && gap.filter(f => f.active).length >= gap.length * 0.7) breaks.push({ at: (v[k].midi + v[k - 1].midi) / 2, kind: 'falha', dir: 0 });
     }
   }
-  // merge breaks closer than 1.5 semitones
   const out = [];
   for (const b of breaks.sort((x, y) => x.at - y.at)) {
     const last = out[out.length - 1];
@@ -169,6 +177,18 @@ export function findBreaks(frames) {
     else out.push({ ...b, count: 1 });
   }
   return out.map(b => ({ ...b, at: Math.round(b.at * 10) / 10 }));
+}
+
+/* keep only breaks that show up in at least `min` different glides (within 1.5 semitones) */
+export function recurringBreaks(lists, min = 2) {
+  const all = lists.flatMap((l, i) => l.map(b => ({ at: b.at, i }))).sort((a, b) => a.at - b.at);
+  const groups = [];
+  for (const b of all) {
+    const g = groups[groups.length - 1];
+    if (g && b.at - g.at[g.at.length - 1] < 1.5) { g.at.push(b.at); g.reps.add(b.i); }
+    else groups.push({ at: [b.at], reps: new Set([b.i]) });
+  }
+  return groups.filter(g => g.reps.size >= Math.min(min, lists.length)).map(g => Math.round(median(g.at)));
 }
 
 export function analyzeGlide(frames) {

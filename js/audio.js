@@ -204,7 +204,7 @@ export class AudioEngine {
     let t = this.ctx.currentTime + 0.08;
     const start = t;
     const shift = this.octaveUp ? 12 : 0;
-    for (const n of notes) { this.tone(n.m + shift, t, Math.max(0.15, n.d - gap)); t += n.d; }
+    for (const n of notes) { this.tone(n.m + shift, t, n.len || Math.max(0.15, n.d - gap)); t += n.d; }
     const ms = (t - this.ctx.currentTime) * 1000;
     await new Promise(r => setTimeout(r, ms + 60));
     return t - start;

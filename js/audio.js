@@ -63,7 +63,9 @@ export class AudioEngine {
     this.raw = null;
     this.half = null;
     this.noise = 0.004;          // ambient RMS floor, updated by calibrate()
-    this.volume = 0.8;
+    this.volume = 1;
+    this.sens = 6;             // microphone sensitivity 1..10
+    this.octaveUp = false;     // play references an octave higher (small speakers)
     this.wakeLock = null;
     this.voice = null;
     this.isIOS = isIOS;
@@ -73,11 +75,14 @@ export class AudioEngine {
   async ensure() {
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
+      // 'playback' also ignores the iPhone silent switch, which otherwise mutes web audio
+      this.setSession('playback');
       this.ctx = new AC({ latencyHint: 'interactive' });
       this.master = this.ctx.createGain();
       this.master.gain.value = this.volume;
       const comp = this.ctx.createDynamicsCompressor();
-      comp.threshold.value = -12; comp.ratio.value = 4;
+      // limiter: lets the volume slider go above 100% without clipping
+      comp.threshold.value = -4; comp.knee.value = 2; comp.ratio.value = 20; comp.attack.value = 0.002; comp.release.value = 0.12;
       this.master.connect(comp).connect(this.ctx.destination);
       this.unlockSpeech();
     }
@@ -89,9 +94,12 @@ export class AudioEngine {
 
   get micOn() { return !!this.stream; }
 
+  setSession(type) { try { if (navigator.audioSession) navigator.audioSession.type = type; } catch (e) {} }
+
   async startMic() {
     await this.ensure();
     if (this.stream) return true;
+    this.setSession('play-and-record');
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 }
     });
@@ -115,6 +123,7 @@ export class AudioEngine {
     this.stream.getTracks().forEach(t => t.stop());
     try { this.src.disconnect(); this.hp.disconnect(); } catch (e) {}
     this.stream = null; this.analyser = null;
+    this.setSession('playback');
   }
 
   /* One analysis frame from the latest microphone samples. */
@@ -130,12 +139,20 @@ export class AudioEngine {
       buf = h; rate = sr / 2;
     }
     const level = rms(buf);
-    const frame = { t: performance.now(), level, midi: null, f: 0, clarity: 0 };
-    if (level < Math.max(0.006, this.noise * 2.5)) return frame;
-    const p = yin(buf, rate);
-    if (p && p.clarity > 0.8) { frame.f = p.f; frame.midi = hzToMidi(p.f); frame.clarity = p.clarity; }
+    const frame = { t: performance.now(), level, midi: null, f: 0, clarity: 0, active: false };
+    if (level < this.gate) return frame;
+    frame.active = true;
+    const p = yin(buf, rate, 65, 1100, 0.12 + 0.01 * (this.sens - 6));
+    if (p && p.clarity > this.minClarity) { frame.f = p.f; frame.midi = hzToMidi(p.f); frame.clarity = p.clarity; }
     return frame;
   }
+
+  /* Level a frame must reach to count as voice. Higher sensitivity = lower gate. */
+  get gate() {
+    const k = Math.max(1, Math.min(10, this.sens)) - 1;
+    return Math.max(0.012 * Math.pow(0.7, k), this.noise * (4 - 0.3 * k));
+  }
+  get minClarity() { return Math.max(0.68, Math.min(0.88, 0.8 - 0.02 * (this.sens - 6))); }
 
   /* Measure the ambient level for ms milliseconds (mic must be on). */
   async calibrate(ms = 700) {
@@ -158,7 +175,7 @@ export class AudioEngine {
     const ctx = this.ctx, f = midiToHz(midi);
     const env = ctx.createGain();
     const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = Math.min(5000, f * 9); lp.Q.value = 0.4;
+    lp.type = 'lowpass'; lp.frequency.value = Math.min(6000, Math.max(2600, f * 10)); lp.Q.value = 0.4;
     env.gain.setValueAtTime(0, t0);
     env.gain.linearRampToValueAtTime(vel, t0 + 0.018);
     env.gain.exponentialRampToValueAtTime(vel * 0.55, t0 + 0.35);
@@ -166,12 +183,16 @@ export class AudioEngine {
     env.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
     env.connect(lp).connect(this.master);
     // harmonics carry the pitch on small phone speakers that cannot play low fundamentals
-    const partials = [[1, 1], [2, 0.5], [3, 0.28], [4, 0.14], [5, 0.07], [6, 0.04]];
+    // low notes get stronger upper harmonics: phone speakers cannot play their fundamentals, so this is what makes them audible
+    const low = f < 260;
+    const partials = low
+      ? [[1, 0.7], [2, 0.75], [3, 0.6], [4, 0.42], [5, 0.28], [6, 0.18], [7, 0.1], [8, 0.06]]
+      : [[1, 1], [2, 0.5], [3, 0.28], [4, 0.14], [5, 0.07], [6, 0.04]];
     for (const [h, a] of partials) {
       const o = ctx.createOscillator();
       const g = ctx.createGain();
       o.type = 'sine'; o.frequency.value = f * h;
-      g.gain.value = a * 0.32;
+      g.gain.value = a * 0.42;
       o.connect(g).connect(env);
       o.start(t0); o.stop(t0 + dur + 0.05);
     }
@@ -182,7 +203,8 @@ export class AudioEngine {
     await this.ensure();
     let t = this.ctx.currentTime + 0.08;
     const start = t;
-    for (const n of notes) { this.tone(n.m, t, Math.max(0.15, n.d - gap)); t += n.d; }
+    const shift = this.octaveUp ? 12 : 0;
+    for (const n of notes) { this.tone(n.m + shift, t, Math.max(0.15, n.d - gap)); t += n.d; }
     const ms = (t - this.ctx.currentTime) * 1000;
     await new Promise(r => setTimeout(r, ms + 60));
     return t - start;

@@ -3,7 +3,7 @@ import { analyzePhrase, analyzeGlide, stableExtreme, findBreaks, summarizeNotes,
 import { EXERCISES, QUICK, exById, buildPlan, estimateMin, noteName, setNotation, intervalName, INTERVALS, DEFAULT_RANGE } from './exercises.js';
 import { GUIDE, guideById, tipsFor } from './guide.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 /* =========================================================
    Storage (this device only)
@@ -13,7 +13,7 @@ const store = {
   set(k, v) { try { localStorage.setItem('vc:' + k, JSON.stringify(v)); return true; } catch (e) { toast('Não foi possível salvar neste aparelho.'); return false; } }
 };
 const S = {
-  settings: Object.assign({ notation: 'cifra', voice: 'carro', carMode: false, tempo: 'normal', micMode: 'continuous', volume: 0.8 }, store.get('settings', {})),
+  settings: Object.assign({ notation: 'cifra', voice: 'carro', carMode: false, tempo: 'normal', micMode: 'continuous', volume: 1, sens: 6, octaveUp: false, slack: 1, v: 1 }, store.get('settings', {})),
   profile: store.get('profile', { range: null }),
   sessions: store.get('sessions', []),
   rangeTests: store.get('rangeTests', []),
@@ -54,7 +54,11 @@ const speaks = () => S.settings.voice === 'sempre' || (S.settings.voice === 'car
    Audio + frame loop
    ========================================================= */
 const engine = new AudioEngine();
+// v2: iPhone plays the reference much louder when the mic is released between turns
+if ((S.settings.v || 1) < 2) { if (engine.isIOS) S.settings.micMode = 'turn'; if (S.settings.volume < 1) S.settings.volume = 1; S.settings.v = 2; saveSettings(); }
 engine.setVolume(S.settings.volume);
+engine.sens = S.settings.sens;
+engine.octaveUp = S.settings.octaveUp;
 const live = [];                 // last ~10 s of frames
 let rec = null;                  // {frames:[], start}
 let lastRead = 0;
@@ -106,6 +110,7 @@ function tick(t) {
       live.push(fr);
       while (live.length && fr.t - live[0].t > 10000) live.shift();
       if (rec) rec.frames.push(fr);
+      if (meterOn) updateMeter(fr);
     }
   }
   if ($('ov').hidden) {
@@ -659,26 +664,37 @@ async function prepAudio(o) {
   if (S.settings.micMode === 'turn') engine.stopMic();
 }
 
-/* wait for the singer's answer; ends early after a pause in the voice */
-async function capture(o, { phraseMs, glide, maxMs, noVoiceMs }) {
-  if (S.settings.micMode === 'turn' || !engine.micOn) { if (!(await micStart())) throw CANCEL; }
-  rec = { frames: [], start: performance.now(), first: null };
-  const max = maxMs || (glide ? 11000 : phraseMs * 1.6 + 2000);
-  const noVoice = noVoiceMs || (glide ? 4500 : Math.min(4500, 1800 + phraseMs * 0.5));
-  const silence = glide ? 1300 : 900;
-  const minAfter = glide ? 1800 : phraseMs * 0.6;
-  let lastVoice = null;
+/* wait for the singer's answer; ends after a real pause in the voice.
+   Activity counts any sound above the mic gate (breaths, consonants, fry), not only clear pitch. */
+const CAPTURE = {
+  phrase: { silence: 1600, noVoice: 7000 },
+  glide: { silence: 2200, noVoice: 9000, max: 18000, minAfter: 3000 },
+  range: { silence: 3000, noVoice: 15000, max: 35000, minAfter: 6000 }
+};
+async function capture(o, { phraseMs = 0, kind = 'phrase', slack = 1 }) {
+  if (!engine.micOn) { if (!(await micStart())) throw CANCEL; }
+  rec = { frames: [], start: performance.now(), first: null, firstAct: null };
+  const P = CAPTURE[kind];
+  const max = P.max || (phraseMs * 1.8 * slack + 4000);
+  const minAfter = P.minAfter || phraseMs * 0.8 * slack;
+  let last = null, seen = 0;
   while (true) {
     await sleep(50);
     guard(o);
     if (o.skip) break;
     const now = performance.now(), el_ = now - rec.start;
-    for (let i = rec.frames.length - 1; i >= 0; i--) { const f = rec.frames[i]; if (f.midi != null) { lastVoice = f.t; if (!rec.first) rec.first = rec.frames.find(x => x.midi != null).t; break; } if (now - f.t > 200) break; }
-    if (!rec.first && el_ > noVoice) break;
-    if (rec.first && lastVoice && now - lastVoice > silence && now - rec.first > minAfter) break;
+    for (; seen < rec.frames.length; seen++) {
+      const f = rec.frames[seen];
+      // clear pitch, or sound well above the gate (so steady road noise does not keep the turn open)
+      if (f.midi != null || (f.active && f.level > engine.gate * 1.6)) { last = f.t; if (!rec.firstAct) rec.firstAct = f.t; }
+      if (f.midi != null && !rec.first) rec.first = f.t;
+    }
+    if (!rec.firstAct && el_ > P.noVoice) break;
+    if (rec.firstAct && last && now - last > P.silence && now - rec.firstAct > minAfter) break;
     if (el_ > max) break;
   }
   const out = rec; rec = null;
+  out.span = out.firstAct && last ? last - out.firstAct : 0;
   if (S.settings.micMode === 'turn') engine.stopMic();
   return out;
 }
@@ -723,7 +739,7 @@ function repFeedback(rep, res) {
 async function startSession(items, title, kind) {
   const range = curRange();
   const plan = buildPlan(items, range, S.settings.tempo);
-  sess = { items, title, kind, plan, results: plan.map(() => []), cancelled: false, paused: false, redo: false, skip: false, t0: Date.now(), running: true };
+  sess = { items, title, kind, plan, results: plan.map(() => []), cancelled: false, paused: false, redo: false, skip: false, t0: Date.now(), running: true, slack: S.settings.slack || 1 };
   const o = sess;
   openOverlay(title, plan[0].ex.name);
   sessionShell();
@@ -752,12 +768,15 @@ async function startSession(items, title, kind) {
         roll = { mode: 'listen', rep, start: performance.now() + 80, range };
         await engine.playPhrase(rep.notes);
         guard(o);
-        // sing
+        // sing (mic first, so the start of the answer is not lost)
+        if (!engine.micOn && !(await micStart())) throw CANCEL;
         await engine.cue('turn');
         setPhase('sing', rep.glide ? 'Deslize devagar até o agudo e volte.' : 'Repita o que ouviu.');
         const phraseMs = rep.notes.reduce((a, n) => a + n.d, 0) * 1000;
-        roll = { mode: 'sing', rep, start: performance.now(), window: rep.glide ? 11000 : phraseMs * 1.6 + 2000, range };
-        const cap = await capture(o, { phraseMs, glide: rep.glide });
+        roll = { mode: 'sing', rep, start: performance.now(), window: rep.glide ? CAPTURE.glide.max : phraseMs * 1.8 * o.slack + 4000, range };
+        const cap = await capture(o, { phraseMs, kind: rep.glide ? 'glide' : 'phrase', slack: o.slack });
+        // learn how long this singer takes to answer, so the window grows if needed
+        if (!rep.glide && cap.span) { o.slack = Math.min(2.5, Math.max(1, 0.6 * o.slack + 0.4 * Math.max(1, cap.span / phraseMs * 1.15))); S.settings.slack = o.slack; saveSettings(); }
         roll.frozen = cap;
         guard(o);
         if (o.skip) break;
@@ -992,9 +1011,10 @@ async function startRangeTest() {
         return (m == null ? '&nbsp;' : `<b>${noteName(Math.round(m))}</b>`) + (ex.stable != null ? ` · ${dir < 0 ? 'mais grave' : 'mais aguda'} estável: <b>${noteName(ex.stable)}</b>` : '');
       };
       if (speaks()) await engine.speak(say); else await sleep(400);
+      if (!engine.micOn && !(await micStart())) throw CANCEL;
       await engine.cue('turn');
       o.skip = false;
-      const cap = await capture(o, { glide: true, maxMs: 18000, phraseMs: 0, noVoiceMs: 9000 });
+      const cap = await capture(o, { kind: 'range' });
       o.skip = false;
       roll.frozen = cap;
       runs[dir] = cap.frames;
@@ -1090,16 +1110,50 @@ function openSheet(title, nodes) {
   const b = $('sheetBody'); b.textContent = ''; nodes.forEach(n => b.append(n));
   $('sheetWrap').hidden = false;
 }
-const closeSheet = () => { $('sheetWrap').hidden = true; };
+const closeSheet = () => { $('sheetWrap').hidden = true; stopMeter(); };
+
+/* live mic meter in the settings sheet */
+let meterOn = false;
+const levelPos = l => Math.max(0, Math.min(1, (20 * Math.log10(Math.max(l, 1e-5)) + 66) / 60));
+function placeGate() { const g = $('meterGate'); if (g) g.style.left = (levelPos(engine.gate) * 100).toFixed(1) + '%'; }
+function updateMeter(fr) {
+  const f = $('meterFill'); if (!f) return;
+  f.style.width = (levelPos(fr.level) * 100).toFixed(1) + '%';
+  f.style.background = fr.midi != null ? COL.good : fr.active ? COL.near : '#4a5070';
+  const n = $('meterNote'); if (n) n.textContent = fr.midi != null ? 'voz: ' + noteName(Math.round(fr.midi)) : fr.active ? 'som, sem nota clara' : 'silêncio';
+}
+function stopMeter() {
+  if (!meterOn) return;
+  meterOn = false;
+  if (!tunerOn && $('ov').hidden) engine.stopMic();
+  const b = $('meterBtn'); if (b) b.lastChild.textContent = ' Testar microfone';
+}
 $('sheetClose').addEventListener('click', closeSheet);
 $('sheetWrap').addEventListener('click', e => { if (e.target === $('sheetWrap')) closeSheet(); });
 $('settingsBtn').addEventListener('click', () => {
   const s = S.settings;
-  const vol = el('input'); vol.type = 'range'; vol.min = '0.2'; vol.max = '1'; vol.step = '0.05'; vol.value = String(s.volume);
+  const vol = el('input'); vol.type = 'range'; vol.min = '0.3'; vol.max = '2'; vol.step = '0.05'; vol.value = String(s.volume);
   vol.addEventListener('input', () => { s.volume = +vol.value; engine.setVolume(s.volume); saveSettings(); });
   const testVol = h(`<button class="btn alt sm" style="--c:${COL.ref};align-self:flex-start">${ICON.speaker} Testar som</button>`);
   testVol.addEventListener('click', () => engine.playPhrase([{ m: curRange().lo + 4, d: 0.5 }, { m: curRange().lo + 7, d: 0.5 }, { m: curRange().lo + 11, d: 0.8 }]));
   const volWrap = el('div'); volWrap.style.cssText = 'display:flex;flex-direction:column;gap:8px'; volWrap.append(vol, testVol);
+  const octSwitch = h(`<button class="switch" role="switch" aria-checked="${s.octaveUp}" style="margin:0"><span class="txt"><b>${s.octaveUp ? 'Ligado' : 'Desligado'}</b></span><span class="tog"></span></button>`);
+  octSwitch.addEventListener('click', () => { s.octaveUp = !s.octaveUp; engine.octaveUp = s.octaveUp; saveSettings(); octSwitch.setAttribute('aria-checked', String(s.octaveUp)); octSwitch.querySelector('b').textContent = s.octaveUp ? 'Ligado' : 'Desligado'; });
+  const sens = el('input'); sens.type = 'range'; sens.min = '1'; sens.max = '10'; sens.step = '1'; sens.value = String(s.sens);
+  const sensWrap = h(`<div style="display:flex;flex-direction:column;gap:8px">
+    <div class="row"><span class="small muted">Baixa</span><span class="spacer"></span><b id="sensVal" style="font-family:var(--f-display)">${s.sens}</b><span class="spacer"></span><span class="small muted">Alta</span></div>
+    <div class="meter" id="micMeter"><div class="fill" id="meterFill"></div><div class="gate" id="meterGate"></div></div>
+    <div class="row"><button class="btn alt sm" id="meterBtn" style="--c:${COL.good}">${ICON.mic} Testar microfone</button><span class="small muted" id="meterNote"></span></div>
+  </div>`);
+  sensWrap.prepend(sens);
+  sens.addEventListener('input', () => { s.sens = +sens.value; engine.sens = s.sens; saveSettings(); sensWrap.querySelector('#sensVal').textContent = s.sens; placeGate(); });
+  sensWrap.querySelector('#meterBtn').addEventListener('click', async () => {
+    if (meterOn) { stopMeter(); return; }
+    await engine.ensure();
+    if (!(await micStart())) return;
+    meterOn = true; sensWrap.querySelector('#meterBtn').lastChild.textContent = ' Parar teste';
+    placeGate();
+  });
   let wipeArmed = false;
   const wipe = h(`<button class="btn alt sm" style="--c:${COL.off};align-self:flex-start">Apagar todos os dados</button>`);
   wipe.addEventListener('click', () => {
@@ -1118,7 +1172,9 @@ $('settingsBtn').addEventListener('click', () => {
     field('Andamento', seg('Andamento', [['lento', 'Lento'], ['normal', 'Normal']], s.tempo, v => { s.tempo = v; saveSettings(); })),
     field('Microfone', seg('Microfone', [['continuous', 'Sempre ligado'], ['turn', 'Só na sua vez']], s.micMode, v => { s.micMode = v; saveSettings(); }),
       'Se no iPhone a referência sair baixa ou pelo alto-falante de ligação enquanto o microfone está ligado, use "Só na sua vez".'),
-    field('Volume da referência', volWrap),
+    field('Volume da referência', volWrap, 'Acima da metade, o som é amplificado com limitador. Se ainda ficar baixo no iPhone, use o microfone "Só na sua vez" e confira se o modo silencioso não está ativo.'),
+    field('Tocar a referência uma oitava acima', octSwitch, 'Alto-falante de celular quase não reproduz notas graves. Com isso ligado, você continua cantando na sua altura: o app aceita a oitava abaixo como certa.'),
+    field('Sensibilidade do microfone', sensWrap, 'Mais alta: capta voz mais baixa ou de longe (bom no carro). Mais baixa: ignora mais ruído. A barra mostra seu som; a linha branca é o mínimo para contar como voz.'),
     field('Dados', dataRow, 'Tudo fica salvo só neste aparelho. Faça um backup de vez em quando.'),
     field('Zona de perigo', wipe),
     h(`<p class="small muted">Canto v${VERSION} · feito com o Claude</p>`)
